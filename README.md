@@ -25,9 +25,15 @@ notes = RailsRuntimes::Store.for(schema)
 notes.create(title: "Offline").await
 ```
 
+## Surface provenance (0.2)
+
+`WorkerDriver` + `Sqlite3Bridge` report `surface: :browser` and `driver_kind: :opfs_sqlite`.
+Register under `:browser` so the same logical model `Notes::Note` can also register `:server`
+in one process without collision.
+
 ## Status
 
-`0.1.0` — compiler + CI sqlite3 bridge green; real OPFS worker asset for **manual browser validation**.
+`0.2.0` — compiler + CI bridge + dual-surface provenance; real OPFS worker asset for **manual browser validation**.
 
 ## Manual browser smoke (not headless-CI)
 

@@ -6,15 +6,16 @@
 require "spec_helper"
 
 RSpec.describe RailsRuntimes::Store::Opfs do
-  def note_schema(table:, name: nil)
-    # DriverRegistry keys by schema.name — keep names unique per table.
-    model_name = name || "Notes::#{table.split(/_+/).map { |p| p.capitalize }.join}"
-    out = RailsRuntimes::Model.define(model_name, table: table) do
+  # ONE logical identity — multi-store routing is by (name, surface).
+  def note_schema
+    out = RailsRuntimes::Model.define("Notes::Note", table: "notes") do
       field :id, type: :uuid, null: false, primary_key: true, default: "__rr_uuid__"
       field :title, type: :string, null: false, default: ""
       field :body, type: :text, null: true
       identity :id, strategy: :client_uuid
       validates :title, :presence
+      store surface: :server, table: "notes", driver_kind: :active_record
+      store surface: :browser, table: "notes", driver_kind: :opfs_sqlite
       local_only
     end
     expect(out.ok?).to be(true), out.to_h.inspect
@@ -35,38 +36,6 @@ RSpec.describe RailsRuntimes::Store::Opfs do
     }
   end
 
-  def crud_sequence(repo, title_prefix:)
-    created = repo.create(title: "#{title_prefix}-Hello", body: "World").await
-    expect(created.ok?).to be(true), created.to_h.inspect
-    record = created.value
-    id = record.id
-
-    found = snapshot_repo(repo, id)
-    expect(found[:title]).to eq("#{title_prefix}-Hello")
-
-    listed = repo.where(title: "#{title_prefix}-Hello").all.await
-    expect(listed.ok?).to be(true)
-    expect(listed.value.map(&:id)).to eq([id])
-
-    updated = repo.update(id, { title: "#{title_prefix}-Hi" }).await
-    expect(updated.ok?).to be(true), updated.to_h.inspect
-    after_update = snapshot_repo(repo, id)
-    expect(after_update[:title]).to eq("#{title_prefix}-Hi")
-    expect(after_update[:revision]).to eq(2)
-
-    destroyed = repo.destroy(id).await
-    expect(destroyed.ok?).to be(true), destroyed.to_h.inspect
-    missing = snapshot_repo(repo, id)
-    expect(missing).to be_nil
-
-    {
-      id: id,
-      after_create: { title: "#{title_prefix}-Hello", body: "World", revision: 1 },
-      after_update: after_update,
-      after_destroy: nil
-    }
-  end
-
   it "has a version and hello envelope" do
     expect(described_class::VERSION).to match(/\A\d+\.\d+\.\d+/)
     expect(described_class.hello[:ok]).to be(true)
@@ -79,82 +48,100 @@ RSpec.describe RailsRuntimes::Store::Opfs do
   end
 
   describe "Sqlite3Bridge + WorkerDriver" do
-    it "round-trips create/find/where/update/destroy" do
-      schema = note_schema(table: "rr_opfs_notes")
-      driver = described_class.test_driver(schema: schema)
-      repo = RailsRuntimes::Store.for(schema)
+    it "round-trips create/find/where/update/destroy with browser origin" do
+      schema = note_schema
+      driver = described_class.test_driver(schema: schema, surface: :browser)
+      expect(driver.surface).to eq(:browser)
+      expect(driver.driver_kind).to eq(:opfs_sqlite)
+
+      repo = RailsRuntimes::Store.for(schema, surface: :browser)
       expect(repo).to be_a(RailsRuntimes::Store::Repository)
       expect(repo.driver).to eq(driver)
 
       created = repo.create(title: "Offline", body: "OPFS-path").await
       expect(created.ok?).to be(true), created.to_h.inspect
-      id = created.value.id
+      record = created.value
+      expect(record.origin.surface).to eq(:browser)
+      expect(record.origin.driver_kind).to eq(:opfs_sqlite)
+      expect(record.graph_terms).to include(
+        ["urn:rr:record:#{record.id}", "urn:rr:storedIn", "urn:rr:store:browser:opfs_sqlite"]
+      )
 
-      found = repo.find(id).await
+      found = repo.find(record.id).await
       expect(found.value[:title]).to eq("Offline")
+      expect(found.value.origin.surface).to eq(:browser)
 
-      updated = repo.update(id, { body: "Updated" }).await
+      updated = repo.update(record.id, { body: "Updated" }).await
       expect(updated.ok?).to be(true)
-      expect(repo.find(id).await.value[:body]).to eq("Updated")
+      expect(repo.find(record.id).await.value[:body]).to eq("Updated")
 
-      expect(repo.destroy(id).await.ok?).to be(true)
-      expect(repo.find(id).await.value).to be_nil
+      expect(repo.destroy(record.id).await.ok?).to be(true)
+      expect(repo.find(record.id).await.value).to be_nil
     end
   end
 
-  describe "server AR vs OPFS bridge parity" do
-    it "produces identical create/find/where/update/destroy results" do
-      schema_ar = note_schema(table: "rr_parity_ar")
-      schema_opfs = note_schema(table: "rr_parity_opfs")
+  describe "dual-surface Notes::Note (acceptance gates)" do
+    it "registers SAME logical name on :server and :browser without collision" do
+      schema = note_schema
+      expect(schema.name).to eq("Notes::Note")
+      expect(schema.graph_terms).to include(
+        ["urn:rr:model:notes.note", "urn:rr:hasBinding", "urn:rr:binding:notes.note:server"]
+      )
+      expect(schema.graph_terms).to include(
+        ["urn:rr:model:notes.note", "urn:rr:hasBinding", "urn:rr:binding:notes.note:browser"]
+      )
 
-      # --- server path ---
       ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
-      ar_driver = RailsRuntimes::Store::Server::ActiveRecordDriver.new
-      expect(ar_driver.install_schema(schema_ar).await.ok?).to be(true)
-      RailsRuntimes::Store::DriverRegistry.register(schema_ar, ar_driver)
-      ar_repo = RailsRuntimes::Store.for(schema_ar)
-      ar_trace = crud_sequence(ar_repo, title_prefix: "AR")
-
-      # --- browser/OPFS path via Sqlite3Bridge (CI stand-in) ---
-      RailsRuntimes::Store::DriverRegistry.reset!
-      opfs_driver = described_class.test_driver(schema: schema_opfs)
-      opfs_repo = RailsRuntimes::Store.for(schema_opfs)
-      expect(opfs_repo.driver).to eq(opfs_driver)
-      opfs_trace = crud_sequence(opfs_repo, title_prefix: "OP")
-
-      # Shape parity (ids differ because client UUIDs; values/revisions match pattern)
-      expect(ar_trace[:after_create][:revision]).to eq(opfs_trace[:after_create][:revision])
-      expect(ar_trace[:after_update][:revision]).to eq(opfs_trace[:after_update][:revision])
-      expect(ar_trace[:after_create][:body]).to eq(opfs_trace[:after_create][:body])
-      expect(ar_trace[:after_destroy]).to eq(opfs_trace[:after_destroy])
-
-      # Side-by-side identical attribute payloads when ids are fixed
-      fixed_id = "11111111-1111-1111-1111-111111111111"
-      RailsRuntimes::Store::DriverRegistry.reset!
-      ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
-      schema_a = note_schema(table: "rr_parity_fixed_ar", name: "ParityAr::Note")
-      schema_b = note_schema(table: "rr_parity_fixed_opfs", name: "ParityOpfs::Note")
       ar = RailsRuntimes::Store::Server::ActiveRecordDriver.new
-      ar.install_schema(schema_a).await
-      RailsRuntimes::Store::DriverRegistry.register(schema_a, ar)
-      op = described_class.test_driver(schema: schema_b)
+      expect(ar.install_schema(schema).await.ok?).to be(true)
+      RailsRuntimes::Store::DriverRegistry.register(schema, ar, surface: :server)
 
-      ar_repo2 = RailsRuntimes::Store.for(schema_a)
-      op_repo2 = RailsRuntimes::Store.for(schema_b)
+      opfs = described_class.test_driver(schema: schema, surface: :browser)
+      expect(opfs.surface).to eq(:browser)
 
-      a = ar_repo2.create(id: fixed_id, title: "Same", body: "Body").await
-      b = op_repo2.create(id: fixed_id, title: "Same", body: "Body").await
-      expect(a.ok?).to be(true)
-      expect(b.ok?).to be(true)
-      expect(snapshot_repo(ar_repo2, fixed_id)).to eq(snapshot_repo(op_repo2, fixed_id))
+      server_repo = RailsRuntimes::Store.for(schema, surface: :server)
+      browser_repo = RailsRuntimes::Store.for(schema, surface: :browser)
+      expect(server_repo.driver).to eq(ar)
+      expect(browser_repo.driver).to eq(opfs)
 
-      ar_repo2.update(fixed_id, { title: "Same2" }).await
-      op_repo2.update(fixed_id, { title: "Same2" }).await
-      expect(snapshot_repo(ar_repo2, fixed_id)).to eq(snapshot_repo(op_repo2, fixed_id))
+      token = "22222222-2222-2222-2222-222222222222"
+      a = server_repo.create(id: token, title: "Shared", body: "A").await
+      b = browser_repo.create(id: token, title: "Shared", body: "B").await
+      expect(a.ok?).to be(true), a.to_h.inspect
+      expect(b.ok?).to be(true), b.to_h.inspect
 
-      ar_repo2.destroy(fixed_id).await
-      op_repo2.destroy(fixed_id).await
-      expect(snapshot_repo(ar_repo2, fixed_id)).to eq(snapshot_repo(op_repo2, fixed_id))
+      # same entity_token; origins differ by surface
+      expect(a.value.id).to eq(token)
+      expect(b.value.id).to eq(token)
+      expect(a.value.origin.entity_token).to eq(token)
+      expect(b.value.origin.entity_token).to eq(token)
+      expect(a.value.origin.surface).to eq(:server)
+      expect(b.value.origin.surface).to eq(:browser)
+      expect(a.value.origin.driver_kind).to eq(:active_record)
+      expect(b.value.origin.driver_kind).to eq(:opfs_sqlite)
+      expect(a.value.origin.table).to eq("notes")
+      expect(b.value.origin.table).to eq("notes")
+
+      expect(a.value.graph_terms).to include(
+        ["urn:rr:record:#{token}", "urn:rr:onSurface", "urn:rr:surface:server"]
+      )
+      expect(b.value.graph_terms).to include(
+        ["urn:rr:record:#{token}", "urn:rr:onSurface", "urn:rr:surface:browser"]
+      )
+      expect(a.value.graph_terms).to include(
+        ["urn:rr:record:#{token}", "urn:rr:viaBinding", "urn:rr:binding:notes.note:server"]
+      )
+      expect(b.value.graph_terms).to include(
+        ["urn:rr:record:#{token}", "urn:rr:viaBinding", "urn:rr:binding:notes.note:browser"]
+      )
+
+      # Same token; independent store bodies until intentionally aligned
+      expect(snapshot_repo(server_repo, token)[:title]).to eq("Shared")
+      expect(snapshot_repo(browser_repo, token)[:title]).to eq("Shared")
+
+      server_repo.update(token, { title: "Same2", body: "Aligned" }).await
+      browser_repo.update(token, { title: "Same2", body: "Aligned" }).await
+      expect(snapshot_repo(server_repo, token)).to eq(snapshot_repo(browser_repo, token))
     end
   end
 

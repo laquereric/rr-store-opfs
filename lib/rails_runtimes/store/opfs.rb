@@ -12,6 +12,7 @@ require_relative "opfs/opfs_bridge"
 
 # OPFS SQLite browser store integration for RailsRuntimes.
 # Reuses Store::Browser::WorkerDriver; supplies SqliteCompiler + bridges.
+# Surface :browser, driver_kind :opfs_sqlite for store-origin provenance.
 module RailsRuntimes
   module Store
     module Opfs
@@ -24,7 +25,8 @@ module RailsRuntimes
       end
 
       # Build a WorkerDriver backed by the in-process sqlite3 test bridge.
-      def test_driver(schema: nil, database: ":memory:")
+      # Registers under surface: :browser (does not collide with :server).
+      def test_driver(schema: nil, database: ":memory:", surface: :browser)
         bridge = Sqlite3Bridge.new(database: database)
         driver = Browser::WorkerDriver.new(bridge: bridge)
         if schema
@@ -32,19 +34,18 @@ module RailsRuntimes
           installed = driver.install_schema(schema).await
           return [driver, installed] if installed.err?
 
-          DriverRegistry.register(schema, driver)
+          DriverRegistry.register(schema, driver, surface: surface)
         end
         driver
       end
 
       # Register a browser OPFS worker driver for a schema.
-      # In production, pass an OpfsBridge connected to the worker asset.
-      def register!(schema, bridge:)
+      def register!(schema, bridge:, surface: :browser)
         driver = Browser::WorkerDriver.new(bridge: bridge)
         installed = driver.install_schema(schema).await
         return installed if installed.err?
 
-        DriverRegistry.register(schema, driver)
+        DriverRegistry.register(schema, driver, surface: surface)
         Outcome.ok(driver)
       end
 

@@ -26,12 +26,21 @@ module RailsRuntimes
           @booted = false
         end
 
+        def surface
+          :browser
+        end
+
+        def driver_kind
+          :opfs_sqlite
+        end
+
         def fetch_by_table(table)
           @schemas[table.to_s]
         end
 
         def register_schema(schema)
-          @schemas[schema.table.to_s] = schema
+          table = schema.respond_to?(:table_for) ? schema.table_for(surface) : schema.table
+          @schemas[table.to_s] = schema
           self
         end
 
@@ -144,6 +153,7 @@ module RailsRuntimes
         end
 
         def install_schema!(schema)
+          table = schema.respond_to?(:table_for) ? schema.table_for(surface) : schema.table
           cols = schema.columns.map do |f|
             sql_type = sqlite_type(f.type)
             null_sql = f.null ? "" : " NOT NULL"
@@ -154,7 +164,7 @@ module RailsRuntimes
             t = c == :_rr_revision ? "INTEGER" : "TEXT"
             cols << "#{quote_ident(c)} #{t}"
           end
-          sql = "CREATE TABLE IF NOT EXISTS #{quote_ident(schema.table)} (#{cols.join(', ')})"
+          sql = "CREATE TABLE IF NOT EXISTS #{quote_ident(table)} (#{cols.join(', ')})"
           @db.execute(sql)
         end
 
