@@ -1,6 +1,6 @@
 # rr-store-opfs
 
-Part of the **RailsRuntimes** ecosystem. Apache-2.0.
+Part of the **RailsRuntimes** ecosystem. DATA YOURS, SOFTWARE MINE (proprietary-restrictive) — see LICENSE.
 
 `rr-store-opfs` is the **browser OPFS SQLite** integration for `rr-store`. It supplies:
 
@@ -47,4 +47,4 @@ Headless/CI **cannot** fully validate the OPFS sync-access-handle path (dedicate
 
 ## Copyright
 
-(c) 2026 CBI BUSINESS TRANSACTIONS, LLC. Part of RailsRuntimes -- https://github.com/laquereric/DataYoursSoftwareMine. Licensed under Apache-2.0.
+(c) 2026 CBI BUSINESS TRANSACTIONS, LLC. Part of RailsRuntimes -- https://github.com/laquereric/DataYoursSoftwareMine. Licensed under DATA YOURS, SOFTWARE MINE (proprietary-restrictive) — see LICENSE.
